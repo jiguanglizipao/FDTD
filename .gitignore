@@ -4,3 +4,9 @@
 *.ptx
 *.cubin
 *.fatbin
+*.o
+*.a
+*.so
+ClangCompleter
+.ycm_extra_conf.py
+build
