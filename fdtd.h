@@ -72,7 +72,7 @@
 
 template <typename DataType, size_t M, size_t blocks, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
-__global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx, int _ny, int _nz, int offz, Function kernel, Arguments... args)
+__global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
     const size_t PADDINGL=M, PADDINGR=(_nx%32>(32-M))?(64-M-_nx%32):(32-M-_nx%32);
     const size_t BLOCK_SIZE = 32;
@@ -87,7 +87,7 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
 
     DataType p1z[2*M+1];
     size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
-    size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg;
+    size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
     int64_t addr_fwd = addr-M*_n12-_n12;
 
     int64_t ir, jr, offr;
@@ -135,7 +135,7 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
         p1z[2*M] = p1[addr_fwd+=_n12];
 
         __syncthreads();
-        kernel(yl+offz, jg, ig-PADDINGL, p0[addr], p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
+        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
         __syncthreads();
         addr+=_n12;
         if(threadIdx.y < 4*M)
@@ -145,7 +145,7 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
 
 template <typename DataType, size_t M, size_t blocks, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
-__global__ static void prop_halo_kernel(DataType *p0, DataType *p1, int _nx, int _ny, int _nz, int nx2, int ny2, int offx, int offy, int offz, Function kernel, Arguments... args)
+__global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t nx2, size_t ny2, size_t offx, size_t offy, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
     const size_t PADDINGL=M, PADDINGR=(_nx%32>(32-M))?(64-M-_nx%32):(32-M-_nx%32);
     const size_t BLOCK_SIZE = 32;
@@ -166,7 +166,7 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, int _nx, int
 
     DataType p1z[2*M+1];
     size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
-    size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg;
+    size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
     int64_t addr_fwd = addr-M*_n12-_n12;
 
     #pragma unroll 
@@ -188,7 +188,7 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, int _nx, int
 
         __syncthreads();
         if(flag)
-            kernel(yl+offz, jg, ig-PADDINGL, p0[addr], p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
+            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
         __syncthreads();
         addr+=_n12;
     }
@@ -224,6 +224,13 @@ public:
         memoryPool.erase(memoryPool.find(name));
     }
 
+    template <typename T=DataType>
+    __host__ T* get(std::string name)
+    {
+        assert(memoryPool.find(name) != memoryPool.end());
+        return (T*)memoryPool[name].get();
+    }
+
     template <typename T>
     __host__ void transferToGPU(std::string name, T* cpu, size_t length)
     {
@@ -245,6 +252,12 @@ public:
         CUDA_ASSERT(cudaMalloc(&p, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR)));
         memoryPool[name] = std::shared_ptr<DataType> ((DataType*)p, [](DataType* p){CUDA_ASSERT(cudaFree(p));});
         return p;
+    }
+
+    __host__ DataType* getCube(std::string name)
+    {
+        assert(memoryPool.find(name) != memoryPool.end());
+        return (DataType*)memoryPool[name].get();
     }
 
     size_t GET(size_t z, size_t y, size_t x, size_t nz, size_t ny, size_t nx)
@@ -289,9 +302,9 @@ public:
         {
             dim3 grid((nx2-2*M)/BLOCK_SIZE, (ny2-2*M)/BLOCK_SIZE);
             if(spill)
-                prop_center_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR), _nx, _ny, nz, M, kernel, args...);
+                prop_center_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             else
-                prop_center_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR), _nx, _ny, nz, M, kernel, args...);
+                prop_center_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
         }
         {
             size_t xs = ((nx2-2*M))/(BLOCK_SIZE-2*M);
@@ -301,16 +314,16 @@ public:
             {
                 dim3 grid(xt-xs, yt);
                 if(spill)
-                    prop_halo_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR),  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, M, kernel, args...);
+                    prop_halo_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 else
-                    prop_halo_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR),  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, M, kernel, args...);
+                    prop_halo_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
             {
                 dim3 grid(xs, yt-ys);
                 if(spill)
-                    prop_halo_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR), _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, M, kernel, args...);
+                    prop_halo_kernel<DataType, M, 2, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 else
-                    prop_halo_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0+M*_ny*(_nx+PADDINGL+PADDINGR), p1+M*_ny*(_nx+PADDINGL+PADDINGR), _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, M, kernel, args...);
+                    prop_halo_kernel<DataType, M, 1, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
         }
         CUDA_ASSERT(cudaDeviceSynchronize());

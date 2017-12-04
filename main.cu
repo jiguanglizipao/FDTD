@@ -30,12 +30,14 @@ int main(const int argc, const char* argv[])
 //    cudaDeviceSynchronize();
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
+    float *vel = new float[nz*ny*nx];
     for(size_t i=0;i<nz;i++)
         for(size_t j=0;j<ny;j++)
             for(size_t k=0;k<nx;k++)
             {
                 p0[GET(i,j,k,nz,ny,nx)] = float(rand())/RAND_MAX;
                 p1[GET(i,j,k,nz,ny,nx)] = float(rand())/RAND_MAX;
+                vel[GET(i,j,k,nz,ny,nx)] = 2*float(rand())/RAND_MAX;
             }
     float *cpu_p0 = new float[nz*ny*nx];
     float *cpu_p1 = new float[nz*ny*nx];
@@ -50,7 +52,7 @@ int main(const int argc, const char* argv[])
             for(size_t j=4;j<ny-4;j++)
                 for(size_t k=4;k<nx-4;k++)
                 {
-                    p0[GET(i,j,k,nz,ny,nx)] = 1./(6*8+1)*(p1[GET(i,j,k,nz,ny,nx)]+
+                    p0[GET(i,j,k,nz,ny,nx)] = vel[GET(i,j,k,nz,ny,nx)]*1./(6*8+1)*(p1[GET(i,j,k,nz,ny,nx)]+
                                                      1.0*(p1[GET(i,j,k+1,nz,ny,nx)]+p1[GET(i,j,k-1,nz,ny,nx)])+
                                                      1.0*(p1[GET(i,j,k+2,nz,ny,nx)]+p1[GET(i,j,k-2,nz,ny,nx)])+
                                                      1.0*(p1[GET(i,j,k+3,nz,ny,nx)]+p1[GET(i,j,k-3,nz,ny,nx)])+
@@ -62,8 +64,8 @@ int main(const int argc, const char* argv[])
                                                      3.0*(p1[GET(i+1,j,k,nz,ny,nx)]+p1[GET(i-1,j,k,nz,ny,nx)])+
                                                      3.0*(p1[GET(i+2,j,k,nz,ny,nx)]+p1[GET(i-2,j,k,nz,ny,nx)])+
                                                      3.0*(p1[GET(i+3,j,k,nz,ny,nx)]+p1[GET(i-3,j,k,nz,ny,nx)])+
-                                                     3.0*(p1[GET(i+4,j,k,nz,ny,nx)]+p1[GET(i-4,j,k,nz,ny,nx)])
-                                                     );
+                                                     3.0*(p1[GET(i+4,j,k,nz,ny,nx)]+p1[GET(i-4,j,k,nz,ny,nx)]))
+                                                     -p0[GET(i,j,k,nz,ny,nx)];
                 }
         printf("loop %d\n", t);
         std::swap(p0, p1);
@@ -73,11 +75,13 @@ int main(const int argc, const char* argv[])
     FDTD<float, nz, nx, ny, 4> fdtd;
     float *gpu_p0 = fdtd.mallocCube("p0");
     float *gpu_p1 = fdtd.mallocCube("p1");
+    float *gpu_vel = fdtd.mallocCube("vel");
     fdtd.transferCubeToGPU("p0", cpu_p0);
     fdtd.transferCubeToGPU("p1", cpu_p1);
-    auto kernel = [=] __device__ (size_t z, size_t y, size_t x, float &output, float* zl, float *yl, float *xl, float scal)
+    fdtd.transferCubeToGPU("vel", vel);
+    auto kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl, float scal, float *vel)
     {
-        output = scal*(xl[0]+
+        output[addr] = vel[addr]*scal*(zl[0]+
                        1.0*(xl[1]+xl[-1])+
                        1.0*(xl[2]+xl[-2])+
                        1.0*(xl[3]+xl[-3])+
@@ -89,16 +93,16 @@ int main(const int argc, const char* argv[])
                        3.0*(zl[1]+zl[-1])+
                        3.0*(zl[2]+zl[-2])+
                        3.0*(zl[3]+zl[-3])+
-                       3.0*(zl[4]+zl[-4])
-                       );
+                       3.0*(zl[4]+zl[-4]))
+                       -output[addr];
     };
     gettimeofday(&start, NULL);
     for(size_t t=0;t<20;t++)
     {
         if(t%2 == 0)
-            fdtd.propagate("p0", "p1", true, kernel, 1.0/(6*8+1));
+            fdtd.propagate("p0", "p1", true, kernel, 1.0/(6*8+1), fdtd.getCube("vel"));
         else
-            fdtd.propagate("p1", "p0", true, kernel, 1.0/(6*8+1));
+            fdtd.propagate("p1", "p0", true, kernel, 1.0/(6*8+1), fdtd.getCube("vel"));
     }
     gettimeofday(&end, NULL);
     printf("GPU time %.6lf\n", double(end.tv_sec-start.tv_sec)+1e-6*double(end.tv_usec-start.tv_usec));
