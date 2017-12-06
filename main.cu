@@ -4,41 +4,33 @@
 #include <iostream>
 #include <sys/time.h>
 #include "fdtd.h"
-const int nz = 512;
-const int ny = 512;
-const int nx = 512;
+const size_t nz = 598;
+const size_t ny = 532;
+const size_t nx = 512;
+const size_t na = 10000;
 #define GET(z, y, x, nz, ny, nx) ((z)*((ny)*(nx))+(y)*(nx)+(x))
 int main(const int argc, const char* argv[])
 {
-//    int x = atoi(argv[1]);
-//    int y = atoi(argv[2]);
-//    auto lambda1 = [=] __device__ (int x, int y)
-//    {
-//        for(int i=0;i<y;i++)x=x*x;
-//        return x;
-//    };
-//    auto lambda2 = [=] __device__ (int x, int y)
-//    {
-//        return x+y;
-//    };
-//    kernel<decltype(&function1), function1><<<1,1>>>(x, y);
-//    kernel<decltype(&function2), function2><<<1,1>>>(x, y);
-//    kernel<<<1,1>>>(class1(), x, y);
-//    kernel<<<1,1>>>(class2(), x, y);
-//    kernel<<<1,1>>>(lambda1, x, y);
-//    kernel<<<1,1>>>(lambda2, x, y);
-//    cudaDeviceSynchronize();
+    FDTD<float, nz, ny, nx, 4> fdtd;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
     float *vel = new float[nz*ny*nx];
+    size_t *addr = new size_t[na];
+    size_t *gpu_addr = new size_t[na];
     for(size_t i=0;i<nz;i++)
         for(size_t j=0;j<ny;j++)
             for(size_t k=0;k<nx;k++)
             {
                 p0[GET(i,j,k,nz,ny,nx)] = float(rand())/RAND_MAX;
                 p1[GET(i,j,k,nz,ny,nx)] = float(rand())/RAND_MAX;
-                vel[GET(i,j,k,nz,ny,nx)] = 2*float(rand())/RAND_MAX;
+                vel[GET(i,j,k,nz,ny,nx)] = float(rand())/RAND_MAX;
             }
+    for(size_t i=0;i<na;i++)
+    {
+        size_t x = rand()%nx, y = rand()%ny, z = rand()%nz;
+        addr[i] = GET(z,y,x,nz,ny,nx);
+        gpu_addr[i] = fdtd.addrTrans(z,y,x);
+    }
     float *cpu_p0 = new float[nz*ny*nx];
     float *cpu_p1 = new float[nz*ny*nx];
     memcpy(cpu_p0, p0, sizeof(float)*nz*ny*nx);
@@ -51,7 +43,6 @@ int main(const int argc, const char* argv[])
         for(size_t i=4;i<nz-4;i++)
             for(size_t j=4;j<ny-4;j++)
                 for(size_t k=4;k<nx-4;k++)
-                {
                     p0[GET(i,j,k,nz,ny,nx)] = vel[GET(i,j,k,nz,ny,nx)]*1./(6*8+1)*(p1[GET(i,j,k,nz,ny,nx)]+
                                                      1.0*(p1[GET(i,j,k+1,nz,ny,nx)]+p1[GET(i,j,k-1,nz,ny,nx)])+
                                                      1.0*(p1[GET(i,j,k+2,nz,ny,nx)]+p1[GET(i,j,k-2,nz,ny,nx)])+
@@ -66,20 +57,30 @@ int main(const int argc, const char* argv[])
                                                      3.0*(p1[GET(i+3,j,k,nz,ny,nx)]+p1[GET(i-3,j,k,nz,ny,nx)])+
                                                      3.0*(p1[GET(i+4,j,k,nz,ny,nx)]+p1[GET(i-4,j,k,nz,ny,nx)]))
                                                      -p0[GET(i,j,k,nz,ny,nx)];
-                }
+        for(size_t i=0;i<na;i++)p0[addr[i]] += 1;
+        for(size_t i=0;i<nz;i++)
+            for(size_t j=0;j<ny;j++)
+                for(size_t k=0;k<nx;k++)
+                    if(i == nz/2 || j == ny/3 || k == nx/4)
+                        p0[GET(i,j,k,nz,ny,nx)] *= 0.9;
+        for(size_t i=4;i<nz-4;i++)
+            for(size_t j=4;j<ny-4;j++)
+                for(size_t k=4;k<nx-4;k++)
+                    p0[GET(i,j,k,nz,ny,nx)] += p0[GET(i,j,k,nz,ny,nx)]*p1[GET(i,j,k,nz,ny,nx)];
         printf("loop %d\n", t);
         std::swap(p0, p1);
     }
     gettimeofday(&end, NULL);
     printf("CPU time %.6lf\n", double(end.tv_sec-start.tv_sec)+1e-6*double(end.tv_usec-start.tv_usec));
-    FDTD<float, nz, nx, ny, 4> fdtd;
-    float *gpu_p0 = fdtd.mallocCube("p0");
-    float *gpu_p1 = fdtd.mallocCube("p1");
-    float *gpu_vel = fdtd.mallocCube("vel");
+    fdtd.mallocCube("p0");
+    fdtd.mallocCube("p1");
+    fdtd.mallocCube("vel");
+    fdtd.malloc<size_t>("addr", na);
     fdtd.transferCubeToGPU("p0", cpu_p0);
     fdtd.transferCubeToGPU("p1", cpu_p1);
     fdtd.transferCubeToGPU("vel", vel);
-    auto kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl, float scal, float *vel)
+    fdtd.transferToGPU("addr", gpu_addr, na);
+    auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl, float*vel, float scal)
     {
         output[addr] = vel[addr]*scal*(zl[0]+
                        1.0*(xl[1]+xl[-1])+
@@ -96,18 +97,35 @@ int main(const int argc, const char* argv[])
                        3.0*(zl[4]+zl[-4]))
                        -output[addr];
     };
+    auto inject_kernel = [=] __device__ (size_t i, float *output, size_t *addr, float add)
+    {
+        atomicAdd(&output[addr[i]], add);
+    };
+    auto filt_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output)
+    {
+        if(z == nz/2 || y == ny/3 || x == nx/4)
+            output[addr] *= 0.9;
+    };
+    auto mul_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float *input)
+    {
+        if(z > 4 && y > 4 && x > 4 && z < nz-4 && y < ny-4 && x < nx-4)
+            output[addr] += output[addr]*input[addr];
+    };
     gettimeofday(&start, NULL);
+    std::string s0 = "p0", s1 = "p1";
     for(size_t t=0;t<20;t++)
     {
-        if(t%2 == 0)
-            fdtd.propagate("p0", "p1", true, kernel, 1.0/(6*8+1), fdtd.getCube("vel"));
-        else
-            fdtd.propagate("p1", "p0", true, kernel, 1.0/(6*8+1), fdtd.getCube("vel"));
+        fdtd.propagate(s0, s1, true, prop_kernel, fdtd.getCube("vel"), 1.0/(6*8+1));
+        fdtd.inject(na, inject_kernel, fdtd.getCube(s0), fdtd.get<size_t>("addr"), 1.0);
+        fdtd.filt(filt_kernel, fdtd.getCube(s0));
+        fdtd.filt(mul_kernel, fdtd.getCube(s0), fdtd.getCube(s1));
+        std::swap(s0, s1);
     }
     gettimeofday(&end, NULL);
     printf("GPU time %.6lf\n", double(end.tv_sec-start.tv_sec)+1e-6*double(end.tv_usec-start.tv_usec));
     fdtd.transferCubeToCPU(cpu_p0, "p0");
     fdtd.transferCubeToCPU(cpu_p1, "p1");
+
     for(size_t i=0;i<nz;i++)
         for(size_t j=0;j<ny;j++)
             for(size_t k=0;k<nx;k++)
