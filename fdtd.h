@@ -2,7 +2,9 @@
 #include <cuda.h>
 #include <cuda_runtime.h>
 #include <cuda_runtime_api.h>
+#include <mpi.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstdint>
 #include <cassert>
 #include <vector>
@@ -201,15 +203,15 @@ template <typename Function, typename... Arguments>
 }
 
 template <typename Function, typename... Arguments>
- __global__ void filt_kernel(size_t _nx, size_t _ny, size_t _nz, size_t PADDINGL, size_t PADDINGR, Function kernel, Arguments... args) 
+ __global__ void filt_kernel(size_t _nx, size_t _ny, size_t zbase, size_t zoff, size_t PADDINGL, size_t PADDINGR, Function kernel, Arguments... args) 
 {
     size_t x = blockDim.x*blockIdx.x+threadIdx.x;
     if(x >= _nx)return;
     size_t y = blockIdx.y;
     size_t z = blockIdx.z;
-    size_t addr = z*(_ny*(_nx+PADDINGL+PADDINGR))+y*(_nx+PADDINGL+PADDINGR)+x+PADDINGL;
+    size_t addr = (z+zoff)*(_ny*(_nx+PADDINGL+PADDINGR))+y*(_nx+PADDINGL+PADDINGR)+x+PADDINGL;
 
-    kernel(z, y, x, addr, args...);
+    kernel(zbase+z, y, x, addr, args...);
 }
 
 template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, size_t PADDINGL=M, size_t PADDINGR=(XSize%32>(32-M))?(64-M-XSize%32):(32-M-XSize%32), size_t BLOCK_SIZE=32, size_t THREADS=256>
@@ -217,11 +219,49 @@ class FDTD
 {
 private:
     std::map<std::string, std::shared_ptr<DataType>> memoryPool;
+    size_t nprocs, rank, size2, off2, off, size, PXSize;
+    std::vector<size_t> mpiSize, mpiOff;
+    MPI::Datatype mpi_datatype;
+
 public:
-    __host__ FDTD()
+   __host__ FDTD()
     {
         assert(M <= 8 && ZSize >= 2*M+1);
         memoryPool.clear();
+        if(!MPI::Is_initialized()) MPI::Init();
+        nprocs = MPI::COMM_WORLD.Get_size();
+        rank = MPI::COMM_WORLD.Get_rank();
+        mpi_datatype = MPI::Datatype::Match_size(MPI_TYPECLASS_REAL, sizeof(DataType));
+
+        mpiSize.resize(nprocs);
+        mpiOff.resize(nprocs+1);
+        for(int i=0;i<nprocs;i++)
+        {
+            mpiSize[i] = ZSize/nprocs+(ZSize%nprocs>i);
+            assert(mpiSize[i] > 2*M);
+            mpiOff[i] = (i==0)?0:(mpiOff[i-1]+mpiSize[i-1]);
+        }
+        mpiOff[nprocs] = ZSize;
+
+        PXSize = PADDINGL+XSize+PADDINGR;
+        size2 = size_t(mpiSize[rank]+(2*M-((rank==0)?M:0)-((rank==nprocs-1)?M:0))) * YSize * PXSize;
+        size = size_t(mpiSize[rank]) * YSize * PXSize;
+        off2 = size_t(mpiOff[rank]-((rank == 0)?0:M)) * YSize * PXSize;
+        off = size_t(mpiOff[rank]) * YSize * PXSize;
+    }
+
+    __host__ ~FDTD()
+    {
+        MPI::Finalize();
+    }
+
+    __host__ void MPI_COMM_WORLD_BCAST(DataType* data, size_t size, int root)
+    {
+        const size_t MAXINT = 1024*1024*512;
+        size_t off=0;
+        for(;size>MAXINT;size-=MAXINT,off+=MAXINT)
+            MPI::COMM_WORLD.Bcast(data+off, MAXINT, mpi_datatype, root);
+        MPI::COMM_WORLD.Bcast(data+off, size, mpi_datatype, root);
     }
 
     template <typename T=DataType>
@@ -231,7 +271,13 @@ public:
         T* p = nullptr;
         CUDA_ASSERT(cudaMalloc(&p, sizeof(T)*length));
         memoryPool[name] = std::shared_ptr<DataType> ((DataType*)p, [](DataType* p){CUDA_ASSERT(cudaFree(p));});
+
         return p;
+    }
+
+    __host__ void sync()
+    {
+        assert(cudaDeviceSynchronize() == cudaSuccess);
     }
 
     __host__ void free(std::string name)
@@ -265,7 +311,7 @@ public:
     {
         assert(memoryPool.find(name) == memoryPool.end());
         DataType* p = nullptr;
-        CUDA_ASSERT(cudaMalloc(&p, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR)));
+        CUDA_ASSERT(cudaMalloc(&p, sizeof(DataType)*size2));
         memoryPool[name] = std::shared_ptr<DataType> ((DataType*)p, [](DataType* p){CUDA_ASSERT(cudaFree(p));});
         return p;
     }
@@ -283,30 +329,59 @@ public:
 
     size_t addrTrans(size_t z, size_t y, size_t x)
     {
-        return z*(YSize*(PADDINGL+XSize+PADDINGR))+y*(PADDINGL+XSize+PADDINGR)+(x+PADDINGL);
+        if(z < mpiOff[rank] || z >= mpiOff[rank+1])
+            return -1;
+        else 
+            return (z-(mpiOff[rank]-((rank == 0)?0:M)))*(YSize*PXSize)+y*PXSize+(x+PADDINGL);
     }
 
     __host__ void transferCubeToGPU(std::string name, DataType* cpu)
     {
-        DataType *tmp = (DataType*)aligned_alloc(64, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR));
-        memset(tmp, 0, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR));
+        DataType *tmp = new DataType[ZSize*YSize*PXSize];
+        memset(tmp, 0, sizeof(DataType)*ZSize*YSize*PXSize);
         for(size_t i=0;i<ZSize;i++)
             for(size_t j=0;j<YSize;j++)
                 for(size_t k=0;k<XSize;k++)
                     tmp[GET(i,j,k+PADDINGL,ZSize,YSize,PADDINGL+XSize+PADDINGR)] = cpu[GET(i,j,k,ZSize,YSize,XSize)];
-        CUDA_ASSERT(cudaMemcpy(memoryPool[name].get(), tmp, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR), cudaMemcpyHostToDevice));
-        ::free(tmp);
+        CUDA_ASSERT(cudaMemcpy(memoryPool[name].get(), tmp+off2, sizeof(DataType)*size2, cudaMemcpyHostToDevice));
+        delete [] tmp;
     }
 
     __host__ void transferCubeToCPU(DataType* cpu, std::string name)
     {
-        DataType *tmp = (DataType*)aligned_alloc(64, sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR));
-        CUDA_ASSERT(cudaMemcpy(tmp, memoryPool[name].get(), sizeof(DataType)*ZSize*YSize*(PADDINGL+XSize+PADDINGR), cudaMemcpyDeviceToHost));
+        DataType *tmp = new DataType[ZSize*YSize*PXSize];
+        CUDA_ASSERT(cudaMemcpy(tmp+off2, memoryPool[name].get(), sizeof(DataType)*size2, cudaMemcpyDeviceToHost));
         for(size_t i=0;i<ZSize;i++)
             for(size_t j=0;j<YSize;j++)
                 for(size_t k=0;k<XSize;k++)
                     cpu[GET(i,j,k,ZSize,YSize,XSize)] = tmp[GET(i,j,k+PADDINGL,ZSize,YSize,PADDINGL+XSize+PADDINGR)];
-        ::free(tmp);
+        delete [] tmp;
+        assert(cudaDeviceSynchronize() == cudaSuccess);
+        size_t size = size_t(mpiSize[rank]) * YSize * XSize;
+        size_t off = size_t(mpiOff[rank]) * YSize * XSize;
+        if(rank == 0)
+        {
+            for(int i=1;i<nprocs;i++)
+            {
+                size_t size = size_t(mpiSize[i]) * YSize * XSize;
+                size_t off = size_t(mpiOff[i]) * YSize * XSize;
+                MPI::COMM_WORLD.Recv(cpu+off, size, mpi_datatype, i, 0);
+            }
+        }
+        else
+        {
+            MPI::COMM_WORLD.Send(cpu+off, size, mpi_datatype, 0, 0);
+        }
+        MPI_COMM_WORLD_BCAST(cpu, ZSize * YSize * XSize, 0);
+    }
+
+    __host__ void commCubeHalo(std::string name)
+    {
+        DataType *p = memoryPool[name].get();
+        size_t recv = (mpiSize[rank]+((rank==0)?0:M))*YSize*PXSize;
+        size_t send = recv-M*YSize*PXSize;
+        if(rank != 0) MPI::COMM_WORLD.Sendrecv(p+M*YSize*PXSize, M*YSize*PXSize, MPI::FLOAT, rank-1, rank-1, p, M*YSize*PXSize, MPI::FLOAT, rank-1, rank);
+        if(rank != nprocs-1) MPI::COMM_WORLD.Sendrecv(p+send, M*YSize*PXSize, MPI::FLOAT, rank+1, rank+1, p+recv, M*YSize*PXSize, MPI::FLOAT, rank+1, rank);
     }
 
     template <typename Function, typename... Arguments>
@@ -315,8 +390,7 @@ public:
         assert(memoryPool.find(input) != memoryPool.end());
         assert(memoryPool.find(output) != memoryPool.end());
         DataType *p0 = memoryPool[output].get(), *p1 = memoryPool[input].get();
-        size_t _nx = XSize, _ny = YSize, _nz = ZSize;
-        size_t nz = _nz-2*M;
+        size_t _nx = XSize, _ny = YSize, nz = mpiSize[rank]-((rank==0)?M:0)-((rank==nprocs-1)?M:0);
         size_t nx2 = (_nx - 2*M) / BLOCK_SIZE * BLOCK_SIZE + 2*M;
         size_t ny2 = (_ny - 2*M) / BLOCK_SIZE * BLOCK_SIZE + 2*M;
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
@@ -360,8 +434,8 @@ public:
     template <typename Function, typename... Arguments>
     __host__ void filt(Function kernel, Arguments... args)
     {
-        dim3 grid(XSize/THREADS+1, YSize, ZSize);
-        filt_kernel<Function, Arguments...><<<grid, THREADS>>>(XSize, YSize, ZSize, PADDINGL, PADDINGR, kernel, args...);
+        dim3 grid(XSize/THREADS+1, YSize, mpiSize[rank]);
+        filt_kernel<Function, Arguments...><<<grid, THREADS>>>(XSize, YSize, mpiOff[rank], (rank == 0)?0:M, PADDINGL, PADDINGR, kernel, args...);
         CUDA_ASSERT(cudaDeviceSynchronize());
     }
 };
