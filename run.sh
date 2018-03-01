@@ -24,4 +24,3 @@ host3=$3
 host4=$4
 shift 4
 mpirun_rsh -export -ssh -np 4 $host1 $host2 $host3 $host4 numactl --cpubind=$CPU --interleave=all --physcpubind=$CPU $@
-
