@@ -18,9 +18,6 @@ then
 fi
 
 export CUDA_VISIBLE_DEVICES=$GPU
-host1=$1
-host2=$2
-host3=$3
-host4=$4
-shift 4
-mpirun_rsh -export -ssh -np 4 $host1 $host2 $host3 $host4 numactl --cpubind=$CPU --interleave=all --physcpubind=$CPU $@
+np=$1
+shift 1
+mpirun_rsh -export -ssh -np $np $@

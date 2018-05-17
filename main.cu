@@ -5,21 +5,24 @@
 #include <sys/time.h>
 #include <random>
 #include "fdtd.h"
-const size_t nz = 598;
-const size_t ny = 532;
+const size_t nz = 512;
+const size_t ny = 512;
 const size_t nx = 512;
 const size_t na = 10000;
 #define GET(z, y, x, nz, ny, nx) ((z)*((ny)*(nx))+(y)*(nx)+(x))
 int main(const int argc, const char* argv[])
 {
-    auto rand = std::mt19937_64(19950918);
     FDTD<float, nz, ny, nx, 4> fdtd;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
     float *vel = new float[nz*ny*nx];
     float *sum = new float[nz*ny*nx];
     size_t *addr = new size_t[na];
+
+    #pragma omp parallel for
     for(size_t i=0;i<nz;i++)
+    {
+        auto rand = std::mt19937_64(19950918+i);
         for(size_t j=0;j<ny;j++)
             for(size_t k=0;k<nx;k++)
             {
@@ -28,6 +31,7 @@ int main(const int argc, const char* argv[])
                 vel[GET(i,j,k,nz,ny,nx)] = float(rand())/rand.max();
                 sum[GET(i,j,k,nz,ny,nx)] = 0.0;
             }
+    }
     for(size_t i=0;i<na;i++)
     {
         size_t x = rand()%nx, y = rand()%ny, z = rand()%nz;
@@ -90,19 +94,19 @@ int main(const int argc, const char* argv[])
     fdtd.transferToGPU("addr", addr, na);
     auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl, float*vel, float scal)
     {
-        output[addr] = 0.5*z-0.2*y-0.3*x+vel[addr]*scal*(zl[0]+
-                       1.0*(xl[1]+xl[-1])+
-                       1.0*(xl[2]+xl[-2])+
-                       1.0*(xl[3]+xl[-3])+
-                       1.0*(xl[4]+xl[-4])+
-                       2.0*(yl[1]+yl[-1])+
-                       2.0*(yl[2]+yl[-2])+
-                       2.0*(yl[3]+yl[-3])+
-                       2.0*(yl[4]+yl[-4])+
-                       3.0*(zl[1]+zl[-1])+
-                       3.0*(zl[2]+zl[-2])+
-                       3.0*(zl[3]+zl[-3])+
-                       3.0*(zl[4]+zl[-4])
+        output[addr] = 0.5f*z-0.2f*y-0.3f*x+vel[addr]*scal*(zl[0]+
+                       1.0f*(xl[1]+xl[-1])+
+                       1.0f*(xl[2]+xl[-2])+
+                       1.0f*(xl[3]+xl[-3])+
+                       1.0f*(xl[4]+xl[-4])+
+                       2.0f*(yl[1]+yl[-1])+
+                       2.0f*(yl[2]+yl[-2])+
+                       2.0f*(yl[3]+yl[-3])+
+                       2.0f*(yl[4]+yl[-4])+
+                       3.0f*(zl[1]+zl[-1])+
+                       3.0f*(zl[2]+zl[-2])+
+                       3.0f*(zl[3]+zl[-3])+
+                       3.0f*(zl[4]+zl[-4])
                        )
                        -output[addr];
     };
@@ -113,7 +117,7 @@ int main(const int argc, const char* argv[])
     auto filt_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output)
     {
         if(z == nz/2 || y == ny/3 || x == nx/4)
-            output[addr] *= 0.9;
+            output[addr] *= 0.9f;
     };
     auto mul_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *sum, float *p0, float *p1)
     {
@@ -181,5 +185,4 @@ int main(const int argc, const char* argv[])
                    (dsum/fabs(cpu_sum[GET(i,j,k,nz,ny,nx)])>1e-2 && dsum>1e-3))
                     fprintf(stderr, "rank = %lu, [%lu][%lu][%lu]: %lf %lf, %lf %lf, %lf %lf\n", rank, i, j, k, p0[GET(i,j,k,nz,ny,nx)], cpu_p0[GET(i,j,k,nz,ny,nx)], p1[GET(i,j,k,nz,ny,nx)], cpu_p1[GET(i,j,k,nz,ny,nx)], sum[GET(i,j,k,nz,ny,nx)], cpu_sum[GET(i,j,k,nz,ny,nx)]);
             }
-    cudaDeviceSynchronize();
 }

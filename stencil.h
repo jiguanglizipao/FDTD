@@ -72,11 +72,10 @@
 //    printf("value = %d\n", function2(x, y)); 
 //}
 
-template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, typename Function, typename... Arguments>
+template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
 __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
-    const size_t BLOCK_SIZE = 32;
     __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
     __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
@@ -144,13 +143,12 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
     }
 }
 
-template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR,  typename Function, typename... Arguments>
+template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
 __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t nx2, size_t ny2, size_t offx, size_t offy, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
-    const size_t BLOCK_SIZE = 32;
-    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE];
-    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M];
+    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE+1];
+    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
     size_t ig = ((blockIdx.x+offx) * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
     size_t jg = ((blockIdx.y+offy) * (blockDim.y-2*M) + threadIdx.y);
@@ -194,13 +192,12 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, 
     }
 }
 
-template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR,  typename Function, typename... Arguments>
+template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
 __global__ static void prop_small_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
-    const size_t BLOCK_SIZE = 32;
-    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE];
-    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M];
+    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE+1];
+    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
     size_t ig = (blockIdx.x * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
     size_t jg = (blockIdx.y * (blockDim.y-2*M) + threadIdx.y);
@@ -262,8 +259,8 @@ template <typename Function, typename... Arguments>
     kernel(zbase+z, y, x, addr, args...);
 }
 
-template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, size_t PADDINGL=M, size_t PADDINGR=(XSize%32>(32-M))?(64-M-XSize%32):(32-M-XSize%32), size_t BLOCK_SIZE=32, size_t THREADS=256>
-class FDTD
+template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, size_t BLOCK_SIZE=32, size_t THREADS=256, size_t PADDINGL=M, size_t PADDINGR=(XSize%BLOCK_SIZE>(BLOCK_SIZE-M))?(2*BLOCK_SIZE-M-XSize%BLOCK_SIZE):(BLOCK_SIZE-M-XSize%BLOCK_SIZE)>
+class Stencil
 {
 private:
     std::map<std::string, std::shared_ptr<DataType>> memoryPool;
@@ -289,7 +286,7 @@ private:
     }
 
 public:
-   __host__ FDTD()
+   __host__ Stencil()
     {
         assert(M <= 8 && ZSize >= 2*M+1);
         memoryPool.clear();
@@ -315,7 +312,7 @@ public:
         off = size_t(mpiOff[rank]) * YSize * PXSize;
     }
 
-    __host__ ~FDTD()
+    __host__ ~Stencil()
     {
         MPI::Finalize();
     }
@@ -596,9 +593,9 @@ public:
         {
             dim3 grid(_nx/(BLOCK_SIZE-8)+1, _ny/(BLOCK_SIZE-8)+1);
             if(spill)
-                prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             else
-                prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
         }
         else
         {
@@ -608,9 +605,9 @@ public:
             {
                 dim3 grid((nx2-2*M)/BLOCK_SIZE, (ny2-2*M)/BLOCK_SIZE);
                 if(spill)
-                    prop_center_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_center_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 else
-                    prop_center_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_center_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
             {
                 size_t xs = ((nx2-2*M))/(BLOCK_SIZE-2*M);
@@ -620,16 +617,16 @@ public:
                 {
                     dim3 grid(xt-xs, yt);
                     if(spill)
-                        prop_halo_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                     else
-                        prop_halo_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 }
                 {
                     dim3 grid(xs, yt-ys);
                     if(spill)
-                        prop_halo_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                     else
-                        prop_halo_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 }
             }
         }
@@ -647,9 +644,9 @@ public:
             {
                 dim3 grid(_nx/(BLOCK_SIZE-8)+1, _ny/(BLOCK_SIZE-8)+1);
                 if(spill)
-                    prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 else
-                    prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
         }
 //        CUDA_ASSERT(cudaDeviceSynchronize());
@@ -667,9 +664,9 @@ public:
             {
                 dim3 grid(_nx/(BLOCK_SIZE-8)+1, _ny/(BLOCK_SIZE-8)+1);
                 if(spill)
-                    prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, mpiOff[rank+1]-M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, mpiOff[rank+1]-M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 else
-                    prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, mpiOff[rank+1]-M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                    prop_small_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, mpiOff[rank+1]-M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
         }
 //        CUDA_ASSERT(cudaDeviceSynchronize());
