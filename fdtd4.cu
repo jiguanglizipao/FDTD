@@ -4,7 +4,7 @@
 #include <iostream>
 #include <sys/time.h>
 #include <random>
-#include "fdtd.h"
+#include "stencil.h"
 const size_t nz = 512;
 const size_t ny = 512;
 const size_t nx = 512;
@@ -12,7 +12,7 @@ const size_t na = 10000;
 #define GET(z, y, x, nz, ny, nx) ((z)*((ny)*(nx))+(y)*(nx)+(x))
 int main(const int argc, const char* argv[])
 {
-    FDTD<float, nz, ny, nx, 4> fdtd;
+    Stencil<float, nz, ny, nx, 4> stencil;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
     float *vel = new float[nz*ny*nx];
@@ -45,31 +45,31 @@ int main(const int argc, const char* argv[])
     memcpy(cpu_sum, sum, sizeof(float)*nz*ny*nx);
     
     struct timeval start, end;
-    fdtd.mallocCube("p0", true);
-    fdtd.mallocCube("p1", true);
-    fdtd.mallocCube("sum");
-    fdtd.mallocCube("vel");
-    fdtd.malloc<size_t>("addr", na, true);
-    fdtd.transferCubeToGPU("p0", cpu_p0);
-    fdtd.transferCubeToGPU("p1", cpu_p1);
-    fdtd.transferCubeToGPU("sum", cpu_sum);
-    fdtd.transferCubeToGPU("vel", vel);
-    fdtd.transferToGPU("addr", addr, na);
-    auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl, float*vel, float scal)
+    stencil.mallocCube("p0", true);
+    stencil.mallocCube("p1", true);
+    stencil.mallocCube("sum");
+    stencil.mallocCube("vel");
+    stencil.malloc<size_t>("addr", na, true);
+    stencil.transferCubeToGPU("p0", cpu_p0);
+    stencil.transferCubeToGPU("p1", cpu_p1);
+    stencil.transferCubeToGPU("sum", cpu_sum);
+    stencil.transferCubeToGPU("vel", vel);
+    stencil.transferToGPU("addr", addr, na);
+    auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, int sz, float *yl, int sy, float *xl, int sx, float*vel, float scal)
     {
         output[addr] = vel[addr]*scal*(zl[0]+
-                       1.0f*(xl[1]+xl[-1])+
-                       1.0f*(xl[2]+xl[-2])+
-                       1.0f*(xl[3]+xl[-3])+
-                       1.0f*(xl[4]+xl[-4])+
-                       2.0f*(yl[1]+yl[-1])+
-                       2.0f*(yl[2]+yl[-2])+
-                       2.0f*(yl[3]+yl[-3])+
-                       2.0f*(yl[4]+yl[-4])+
-                       3.0f*(zl[1]+zl[-1])+
-                       3.0f*(zl[2]+zl[-2])+
-                       3.0f*(zl[3]+zl[-3])+
-                       3.0f*(zl[4]+zl[-4])
+                       1.0f*(xl[1*sx]+xl[-1*sx])+
+                       1.0f*(xl[2*sx]+xl[-2*sx])+
+                       1.0f*(xl[3*sx]+xl[-3*sx])+
+                       1.0f*(xl[4*sx]+xl[-4*sx])+
+                       2.0f*(yl[1*sy]+yl[-1*sy])+
+                       2.0f*(yl[2*sy]+yl[-2*sy])+
+                       2.0f*(yl[3*sy]+yl[-3*sy])+
+                       2.0f*(yl[4*sy]+yl[-4*sy])+
+                       3.0f*(zl[1*sz]+zl[-1*sz])+
+                       3.0f*(zl[2*sz]+zl[-2*sz])+
+                       3.0f*(zl[3*sz]+zl[-3*sz])+
+                       3.0f*(zl[4*sz]+zl[-4*sz])
                        )
                        -output[addr];
     };
@@ -87,23 +87,23 @@ int main(const int argc, const char* argv[])
         if(z >= 4 && y >= 4 && x >= 4 && z < nz-4 && y < ny-4 && x < nx-4)
             sum[addr] += p0[addr]*p1[addr];
     };
-    fdtd.barrier();
+    stencil.barrier();
     gettimeofday(&start, NULL);
     std::string s0 = "p0", s1 = "p1";
     for(size_t t=0;t<1000;t++)
     {
-        fdtd.backupCubeHaloBackup(s0);
-        fdtd.backupCubeHaloBackup(s1);
-        fdtd.propagateHaloTopBackup(s0, s1, true, prop_kernel, fdtd.getCubeHaloTopBackup("vel"), 1.0/(6*8+1));
-        fdtd.propagateHaloButtomBackup(s0, s1, true, prop_kernel, fdtd.getCubeHaloButtomBackup("vel"), 1.0/(6*8+1));
-        fdtd.sync();
-        fdtd.propagate(s0, s1, true, prop_kernel, fdtd.getCube("vel"), 1.0/(6*8+1));
-        fdtd.commCubeHaloBackup(s0);
-        fdtd.commCubeHaloBackup(s1);
-        fdtd.sync();
-        fdtd.restoreCubeHaloBackup(s0);
-        fdtd.restoreCubeHaloBackup(s1);
-        fdtd.sync();
+        stencil.backupCubeHaloBackup(s0);
+        stencil.backupCubeHaloBackup(s1);
+        stencil.propagateHaloTopBackup(s0, s1, true, prop_kernel, stencil.getCubeHaloTopBackup("vel"), 1.0/(6*8+1));
+        stencil.propagateHaloButtomBackup(s0, s1, true, prop_kernel, stencil.getCubeHaloButtomBackup("vel"), 1.0/(6*8+1));
+        stencil.sync();
+        stencil.propagate(s0, s1, true, prop_kernel, stencil.getCube("vel"), 1.0/(6*8+1));
+        stencil.commCubeHaloBackup(s0);
+        stencil.commCubeHaloBackup(s1);
+        stencil.sync();
+        stencil.restoreCubeHaloBackup(s0);
+        stencil.restoreCubeHaloBackup(s1);
+        stencil.sync();
         std::swap(s0, s1);
     }
     gettimeofday(&end, NULL);
@@ -111,7 +111,8 @@ int main(const int argc, const char* argv[])
     memset(cpu_p0, 0, sizeof(float)*nz*ny*nx);
     memset(cpu_p1, 0, sizeof(float)*nz*ny*nx);
     memset(cpu_sum, 0, sizeof(float)*nz*ny*nx);
-    fdtd.transferCubeToCPU(cpu_p0, s0);
-    fdtd.transferCubeToCPU(cpu_p1, s1);
-    fdtd.transferCubeToCPU(cpu_sum, "sum");
+    stencil.transferCubeToCPU(cpu_p0, s0);
+    stencil.transferCubeToCPU(cpu_p1, s1);
+    stencil.transferCubeToCPU(cpu_sum, "sum");
+    return 0;
 }

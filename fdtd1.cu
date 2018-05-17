@@ -32,9 +32,9 @@ int main(const int argc, const char* argv[])
     stencil.mallocCube("p1", true);
     stencil.transferCubeToGPU("p0", p0);
     stencil.transferCubeToGPU("p1", p1);
-    auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, float *yl, float *xl)
+    auto prop_kernel = [=] __device__ (size_t z, size_t y, size_t x, size_t addr, float *output, float* zl, int sz, float *yl, int sy, float *xl, int sx)
     {
-        output[addr] = (0.01f*zl[0]+0.02f*xl[1]+0.03f*xl[-1]+0.04f*yl[1]+0.05f*yl[-1]+0.06f*zl[1]+0.07f*zl[-1]);
+        output[addr] = (0.01f*zl[0]+0.02f*xl[1*sx]+0.03f*xl[-1*sx]+0.04f*yl[1*sy]+0.05f*yl[-1*sy]+0.06f*zl[1*sz]+0.07f*zl[-1*sz]);
     };
     stencil.barrier();
     gettimeofday(&start, NULL);
@@ -59,5 +59,5 @@ int main(const int argc, const char* argv[])
     printf("GPU time %.6lf\n", double(end.tv_sec-start.tv_sec)+1e-6*double(end.tv_usec-start.tv_usec));
     stencil.transferCubeToCPU(p0, s0);
     stencil.transferCubeToCPU(p1, s1);
-
+    return 0;
 }

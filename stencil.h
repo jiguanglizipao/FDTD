@@ -74,10 +74,30 @@
 
 template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
+__global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
+{
+    size_t ig = (blockIdx.x * blockDim.x + threadIdx.x + PADDINGL);
+    size_t jg = (blockIdx.y * blockDim.y + threadIdx.y );
+    if(ig >= _nx+PADDINGL-M || jg >= _ny-M)return;
+    if(ig < M+PADDINGL || jg < M)return;
+
+    size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
+    size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
+    int64_t addr_fwd = addr-M*_n12-_n12;
+
+//    #pragma unroll 2
+    for(size_t yl=0; yl<_nz; yl++)
+    {
+        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, &p1[addr], _n12, &p1[addr], _nx+PADDINGL+PADDINGR, &p1[addr], 1, args...);
+        addr+=_n12;
+    }
+}
+
+template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PADDINGR, size_t BLOCK_SIZE, typename Function, typename... Arguments>
+__launch_bounds__(1024, blocks)
 __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
     __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
-    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
     size_t ig = (blockIdx.x * blockDim.x + threadIdx.x + M + PADDINGL);
     size_t jg = (blockIdx.y * blockDim.y + threadIdx.y + M);
@@ -113,13 +133,13 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
     }
     if(threadIdx.y < 4*M)
     {
-        p1st[ir][jr] = p1s[jr][ir] = p1[addr + offr];
+        p1s[jr][ir] = p1[addr + offr];
     }
     __syncthreads();
 
     #pragma unroll 
     for(size_t t=1;t<M;t++) p1z[t] = p1[addr_fwd+=_n12];
-    p1z[M] = p1st[il][jl] = p1s[jl][il] = p1[addr_fwd+=_n12];
+    p1z[M] = p1s[jl][il] = p1[addr_fwd+=_n12];
     #pragma unroll 
     for(size_t t=M+1;t<=2*M;t++) p1z[t]=p1[addr_fwd+=_n12];
 
@@ -129,17 +149,17 @@ __global__ static void prop_center_kernel(DataType *p0, DataType *p1, size_t _nx
         #pragma unroll 
         for(size_t t=0;t<M-1;t++) p1z[t] = p1z[t+1];
         p1z[M-1] = p1s[jl][il];
-        p1z[M] = p1st[il][jl] = p1s[jl][il] = p1z[M+1];
+        p1z[M] = p1s[jl][il] = p1z[M+1];
         #pragma unroll 
         for(size_t t=M+1;t<2*M;t++) p1z[t] = p1z[t+1];
         p1z[2*M] = p1[addr_fwd+=_n12];
 
         __syncthreads();
-        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
+        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], BLOCK_SIZE+2*M+1, &p1s[jl][il], 1, args...);
         __syncthreads();
         addr+=_n12;
         if(threadIdx.y < 4*M)
-            p1st[ir][jr] = p1s[jr][ir] = p1[addr + offr];
+            p1s[jr][ir] = p1[addr + offr];
     }
 }
 
@@ -147,8 +167,7 @@ template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PA
 __launch_bounds__(1024, blocks)
 __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t nx2, size_t ny2, size_t offx, size_t offy, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
-    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE+1];
-    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
+    __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
     size_t ig = ((blockIdx.x+offx) * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
     size_t jg = ((blockIdx.y+offy) * (blockDim.y-2*M) + threadIdx.y);
@@ -169,7 +188,7 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, 
 
     #pragma unroll 
     for(size_t t=1;t<M;t++) p1z[t] = p1[addr_fwd+=_n12];
-    p1z[M] = p1st[il][jl] = p1s[jl][il] = p1[addr_fwd+=_n12];
+    p1z[M] = p1s[jl][il] = p1[addr_fwd+=_n12];
     #pragma unroll 
     for(size_t t=M+1;t<=2*M;t++) p1z[t]=p1[addr_fwd+=_n12];
 
@@ -179,14 +198,14 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, size_t _nx, 
         #pragma unroll 
         for(size_t t=0;t<M-1;t++) p1z[t] = p1z[t+1];
         p1z[M-1] = p1s[jl][il];
-        p1z[M] = p1st[il][jl] = p1s[jl][il] = p1z[M+1];
+        p1z[M] = p1s[jl][il] = p1z[M+1];
         #pragma unroll 
         for(size_t t=M+1;t<2*M;t++) p1z[t] = p1z[t+1];
         p1z[2*M] = p1[addr_fwd+=_n12];
 
         __syncthreads();
         if(flag)
-            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
+            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], BLOCK_SIZE+2*M+1, &p1s[jl][il], 1, args...);
         __syncthreads();
         addr+=_n12;
     }
@@ -196,8 +215,7 @@ template <typename DataType, size_t M, size_t blocks, size_t PADDINGL, size_t PA
 __launch_bounds__(1024, blocks)
 __global__ static void prop_small_kernel(DataType *p0, DataType *p1, size_t _nx, size_t _ny, size_t _nz, size_t offz, size_t offaddr, Function kernel, Arguments... args)
 {
-    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE+1];
-    __shared__ DataType p1st[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
+    __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
 
     size_t ig = (blockIdx.x * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
     size_t jg = (blockIdx.y * (blockDim.y-2*M) + threadIdx.y);
@@ -216,7 +234,7 @@ __global__ static void prop_small_kernel(DataType *p0, DataType *p1, size_t _nx,
 
     #pragma unroll 
     for(size_t t=1;t<M;t++) p1z[t] = p1[addr_fwd+=_n12];
-    p1z[M] = p1st[il][jl] = p1s[jl][il] = p1[addr_fwd+=_n12];
+    p1z[M] = p1s[jl][il] = p1[addr_fwd+=_n12];
     #pragma unroll 
     for(size_t t=M+1;t<=2*M;t++) p1z[t]=p1[addr_fwd+=_n12];
 
@@ -226,14 +244,14 @@ __global__ static void prop_small_kernel(DataType *p0, DataType *p1, size_t _nx,
         #pragma unroll 
         for(size_t t=0;t<M-1;t++) p1z[t] = p1z[t+1];
         p1z[M-1] = p1s[jl][il];
-        p1z[M] = p1st[il][jl] = p1s[jl][il] = p1z[M+1];
+        p1z[M] = p1s[jl][il] = p1z[M+1];
         #pragma unroll 
         for(size_t t=M+1;t<2*M;t++) p1z[t] = p1z[t+1];
         p1z[2*M] = p1[addr_fwd+=_n12];
 
         __syncthreads();
         if(flag)
-            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, &p1st[il][jl], &p1s[jl][il], args...);
+            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], BLOCK_SIZE+2*M+1, &p1s[jl][il], 1, args...);
         __syncthreads();
         addr+=_n12;
     }
@@ -340,7 +358,7 @@ public:
     template <typename T=DataType>
     __host__ T* malloc(std::string name, size_t length, bool is_address = false)
     {
-        assert(memoryPool.find(name) == memoryPool.end());
+         assert(memoryPool.find(name) == memoryPool.end());
         T* p = nullptr;
         CUDA_ASSERT(cudaMalloc(&p, sizeof(T)*length));
         memoryPool[name] = std::shared_ptr<DataType> ((DataType*)p, [](DataType* p){CUDA_ASSERT(cudaFree(p));});
@@ -588,10 +606,22 @@ public:
         assert(memoryPool.find(output) != memoryPool.end());
         DataType *p0 = memoryPool[output].get(), *p1 = memoryPool[input].get();
         size_t _nx = XSize, _ny = YSize, nz = mpiSize[rank]-((rank==0)?M:0)-((rank==nprocs-1)?M:0);
+
+        if(true || M <= 1)
+        {
+            dim3 block(256, 1);
+            dim3 grid(_nx/256+1, _ny/1+1);
+            if(spill)
+                prop_center_nosm_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+            else
+                prop_center_nosm_kernel<DataType, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+            return ;
+        }
+
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
         if(_nx < 2*BLOCK_SIZE || _ny < 2*BLOCK_SIZE)
         {
-            dim3 grid(_nx/(BLOCK_SIZE-8)+1, _ny/(BLOCK_SIZE-8)+1);
+            dim3 grid(_nx/(BLOCK_SIZE-2*M)+1, _ny/(BLOCK_SIZE-2*M)+1);
             if(spill)
                 prop_small_kernel<DataType, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             else
