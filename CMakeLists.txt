@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8)
 project(FDTD)
 
 find_package(CUDA REQUIRED)
-set(CUDA_NVCC_FLAGS -arch=sm_61;-gencode arch=compute_70,code=sm_70;-gencode arch=compute_60,code=sm_60;-O3;--expt-extended-lambda;-g -lineinfo;-w;)#-Xptxas -v)
+set(CUDA_NVCC_FLAGS -arch=sm_70;-O3;--expt-extended-lambda;-g -lineinfo;-w;-Xptxas -v;-DSKIP_CPU)
 
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)

@@ -2,8 +2,8 @@
 #include<stdio.h>
 
 #define REAL float
-#define NX 1024 
-#define NY 1024 
+#define NX 512 
+#define NY 512 
 #define NZ 512 
 #define T  1000
 
