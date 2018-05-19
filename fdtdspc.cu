@@ -14,7 +14,7 @@ typedef uint32_t gpu_size_t;
 typedef int32_t gpu_signed_size_t;
 int main(const int argc, const char* argv[])
 {
-    Stencil<float, nz, ny, nx, 1, true, gpu_size_t, gpu_signed_size_t> stencil;
+    Stencil<float, nz, ny, nx, 1, false, gpu_size_t, gpu_signed_size_t> stencil;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
 
@@ -46,7 +46,10 @@ int main(const int argc, const char* argv[])
                     p0[GET(i,j,k,nz,ny,nx)] = (0.01f*p1[GET(i,j,k,nz,ny,nx)]+
                                               (0.02f*p1[GET(i,j,k+1,nz,ny,nx)]+0.03f*p1[GET(i,j,k-1,nz,ny,nx)])+
                                               (0.04f*p1[GET(i,j+1,k,nz,ny,nx)]+0.05f*p1[GET(i,j-1,k,nz,ny,nx)])+
-                                              (0.06f*p1[GET(i+1,j,k,nz,ny,nx)]+0.07f*p1[GET(i-1,j,k,nz,ny,nx)]));
+                                              (0.06f*p1[GET(i+1,j,k,nz,ny,nx)]+0.07f*p1[GET(i-1,j,k,nz,ny,nx)])+
+                                              (0.02f*p1[GET(i,j+1,k+1,nz,ny,nx)]+0.03f*p1[GET(i,j-1,k-1,nz,ny,nx)])+
+                                              (0.04f*p1[GET(i+1,j+1,k,nz,ny,nx)]+0.05f*p1[GET(i-1,j-1,k,nz,ny,nx)])+
+                                              (0.06f*p1[GET(i+1,j+1,k+1,nz,ny,nx)]+0.07f*p1[GET(i-1,j-1,k-1,nz,ny,nx)]));
         if(stencil.getRank() == 0) printf("loop %lu\n", t);
         std::swap(p0, p1);
     }
@@ -60,7 +63,13 @@ int main(const int argc, const char* argv[])
     stencil.transferCubeToGPU("p1", gpu_p1);
     auto prop_kernel = [=] __device__ (gpu_size_t z, gpu_size_t y, gpu_size_t x, gpu_size_t addr, float *output, float* zl, gpu_signed_size_t sz, float *yl, gpu_signed_size_t sy, float *xl, gpu_signed_size_t sx)
     {
-        output[addr] = (0.01f*zl[0]+0.02f*xl[1*sx]+0.03f*xl[-1*sx]+0.04f*yl[1*sy]+0.05f*yl[-1*sy]+0.06f*zl[1*sz]+0.07f*zl[-1*sz]);
+        output[addr] = (0.01f*zl[0]+
+                        0.02f*xl[sx]+0.03f*xl[-sx]+
+                        0.04f*yl[sy]+0.05f*yl[-sy]+
+                        0.06f*zl[sz]+0.07f*zl[-sz]+
+                        0.02f*xl[sx+sy]+0.03f*xl[-sx-sy]+
+                        0.04f*yl[sy+sz]+0.05f*yl[-sy-sz]+
+                        0.06f*zl[sz+sy+sx]+0.07f*zl[-sz-sy-sx]);
     };
     stencil.barrier();
     start = std::chrono::system_clock::now();

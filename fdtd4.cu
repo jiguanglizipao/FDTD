@@ -14,7 +14,7 @@ typedef uint32_t gpu_size_t;
 typedef int32_t gpu_signed_size_t;
 int main(const int argc, const char* argv[])
 {
-    Stencil<float, nz, ny, nx, 4, gpu_size_t, gpu_signed_size_t> stencil;
+    Stencil<float, nz, ny, nx, 4, true, gpu_size_t, gpu_signed_size_t> stencil;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
     float *vel = new float[nz*ny*nx];

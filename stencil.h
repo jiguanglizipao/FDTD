@@ -74,7 +74,7 @@
 
 template <typename DataType, typename gpu_size_t, typename gpu_signed_size_t, gpu_size_t M, gpu_size_t blocks, gpu_size_t PADDINGL, gpu_size_t PADDINGR, gpu_size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(512, blocks)
-__global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
+__global__ static void prop_center_bf_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
 {
     gpu_size_t ig = (blockIdx.x * blockDim.x + threadIdx.x + PADDINGL);
     gpu_size_t jg = (blockIdx.y * blockDim.y + threadIdx.y );
@@ -88,6 +88,35 @@ __global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_s
     for(gpu_size_t yl=0; yl<_nz; yl++)
     {
         kernel(yl+offz, jg, ig-PADDINGL, addr, p0, &p1[addr], _n12, &p1[addr], _nx+PADDINGL+PADDINGR, &p1[addr], 1, args...);
+        addr+=_n12;
+    }
+}
+
+template <typename DataType, typename gpu_size_t, typename gpu_signed_size_t, gpu_size_t M, gpu_size_t blocks, gpu_size_t PADDINGL, gpu_size_t PADDINGR, gpu_size_t BLOCK_SIZE, typename Function, typename... Arguments>
+__launch_bounds__(512, blocks)
+__global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
+{
+    gpu_size_t ig = (blockIdx.x * blockDim.x + threadIdx.x + PADDINGL);
+    gpu_size_t jg = (blockIdx.y * blockDim.y + threadIdx.y );
+    if(ig >= _nx+PADDINGL-M || jg >= _ny-M)return;
+    if(ig < M+PADDINGL || jg < M)return;
+
+    gpu_size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
+    gpu_size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
+    gpu_signed_size_t addr_fwd = addr-M*_n12-_n12;
+    DataType p1z[2*M+1];
+
+    #pragma unroll 
+    for(gpu_size_t t=1;t<=2*M;t++) p1z[t] = p1[addr_fwd+=_n12];
+
+    #pragma unroll 2
+    for(gpu_size_t yl=0; yl<_nz; yl++)
+    {
+        #pragma unroll 
+        for(gpu_size_t t=0;t<2*M;t++) p1z[t] = p1z[t+1];
+        p1z[2*M] = p1[addr_fwd+=_n12];
+
+        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, &p1z[M], 1, &p1[addr], _nx+PADDINGL+PADDINGR, &p1[addr], 1, args...);
         addr+=_n12;
     }
 }
@@ -276,7 +305,7 @@ template <typename gpu_size_t, typename gpu_signed_size_t, typename Function, ty
     kernel(zbase+z, y, x, addr, args...);
 }
 
-template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, typename gpu_size_t=uint32_t, typename gpu_signed_size_t=int32_t, size_t BLOCK_SIZE=32, size_t THREADS=256, size_t PADDINGL=(M==1)?0:M, size_t PADDINGR=(M==1)?(BLOCK_SIZE-XSize%BLOCK_SIZE):((XSize%BLOCK_SIZE>(BLOCK_SIZE-M))?(2*BLOCK_SIZE-M-XSize%BLOCK_SIZE):(BLOCK_SIZE-M-XSize%BLOCK_SIZE))>
+template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, bool FDTD=true, typename gpu_size_t=uint32_t, typename gpu_signed_size_t=int32_t, size_t BLOCK_SIZE=32, size_t THREADS=256, size_t PADDINGL=(M==1||!FDTD)?0:M, size_t PADDINGR=(M==1||!FDTD)?(BLOCK_SIZE-XSize%BLOCK_SIZE):((XSize%BLOCK_SIZE>(BLOCK_SIZE-M))?(2*BLOCK_SIZE-M-XSize%BLOCK_SIZE):(BLOCK_SIZE-M-XSize%BLOCK_SIZE))>
 class Stencil
 {
 private:
@@ -606,7 +635,18 @@ public:
         DataType *p0 = memoryPool[output].get(), *p1 = memoryPool[input].get();
         size_t _nx = XSize, _ny = YSize, nz = mpiSize[rank]-((rank==0)?M:0)-((rank==nprocs-1)?M:0);
 
-        if(M <= 1)
+        if(!FDTD)
+        {
+            dim3 block(64, 8);
+            dim3 grid(_nx/64+1, _ny/8+1);
+            if(spill)
+                prop_center_bf_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2048/512, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+            else
+                prop_center_bf_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+            return ;
+        }
+
+        if(M == 1)
         {
             dim3 block(64, 8);
             dim3 grid(_nx/64+1, _ny/8+1);
