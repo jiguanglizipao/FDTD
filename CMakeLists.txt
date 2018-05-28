@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 2.8)
 project(FDTD)
 
 find_package(CUDA REQUIRED)
-set(CUDA_NVCC_FLAGS -arch=sm_70;-O3;--expt-extended-lambda;-g -lineinfo;-w;-Xptxas -v;)#-DSKIP_CPU)
+set(CUDA_NVCC_FLAGS -arch=sm_70;-O3;--expt-extended-lambda;-g -lineinfo;-w;-Xptxas -v;-DSKIP_CPU)
 
 include(CheckCXXCompilerFlag)
 CHECK_CXX_COMPILER_FLAG("-std=c++11" COMPILER_SUPPORTS_CXX11)
@@ -25,5 +25,7 @@ enable_language(CXX)
 
 cuda_add_executable(fdtd main.cu)
 cuda_add_executable(fdtd1 fdtd1.cu)
+cuda_add_executable(fdtd2 fdtd2.cu)
+cuda_add_executable(fdtd3 fdtd3.cu)
 cuda_add_executable(fdtd4 fdtd4.cu)
 cuda_add_executable(fdtdspc fdtdspc.cu)

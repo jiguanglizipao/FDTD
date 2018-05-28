@@ -14,7 +14,7 @@ typedef uint32_t gpu_size_t;
 typedef int32_t gpu_signed_size_t;
 int main(const int argc, const char* argv[])
 {
-    Stencil<float, nz, ny, nx, 1, true, gpu_size_t, gpu_signed_size_t> stencil;
+    Stencil<float, nz, ny, nx, 3, true, gpu_size_t, gpu_signed_size_t> stencil;
     float *p0 = new float[nz*ny*nx];
     float *p1 = new float[nz*ny*nx];
 
@@ -40,13 +40,19 @@ int main(const int argc, const char* argv[])
     for(size_t t=0;t<1000;t++)
     {
         #pragma omp parallel for
-        for(size_t i=1;i<nz-1;i++)
-            for(size_t j=1;j<ny-1;j++)
-                for(size_t k=1;k<nx-1;k++)
+        for(size_t i=3;i<nz-3;i++)
+            for(size_t j=3;j<ny-3;j++)
+                for(size_t k=3;k<nx-3;k++)
                     p0[GET(i,j,k,nz,ny,nx)] = (0.01f*p1[GET(i,j,k,nz,ny,nx)]+
                                               (0.02f*p1[GET(i,j,k+1,nz,ny,nx)]+0.03f*p1[GET(i,j,k-1,nz,ny,nx)])+
                                               (0.04f*p1[GET(i,j+1,k,nz,ny,nx)]+0.05f*p1[GET(i,j-1,k,nz,ny,nx)])+
-                                              (0.06f*p1[GET(i+1,j,k,nz,ny,nx)]+0.07f*p1[GET(i-1,j,k,nz,ny,nx)]));
+                                              (0.06f*p1[GET(i+1,j,k,nz,ny,nx)]+0.07f*p1[GET(i-1,j,k,nz,ny,nx)])+
+                                              (0.02f*p1[GET(i,j,k+2,nz,ny,nx)]+0.03f*p1[GET(i,j,k-2,nz,ny,nx)])+
+                                              (0.04f*p1[GET(i,j+2,k,nz,ny,nx)]+0.05f*p1[GET(i,j-2,k,nz,ny,nx)])+
+                                              (0.06f*p1[GET(i+2,j,k,nz,ny,nx)]+0.07f*p1[GET(i-2,j,k,nz,ny,nx)])+
+                                              (0.02f*p1[GET(i,j,k+3,nz,ny,nx)]+0.03f*p1[GET(i,j,k-3,nz,ny,nx)])+
+                                              (0.04f*p1[GET(i,j+3,k,nz,ny,nx)]+0.05f*p1[GET(i,j-3,k,nz,ny,nx)])+
+                                              (0.06f*p1[GET(i+3,j,k,nz,ny,nx)]+0.07f*p1[GET(i-3,j,k,nz,ny,nx)]));
         if(stencil.getRank() == 0) printf("loop %lu\n", t);
         std::swap(p0, p1);
     }
@@ -60,7 +66,10 @@ int main(const int argc, const char* argv[])
     stencil.transferCubeToGPU("p1", gpu_p1);
     auto prop_kernel = [=] __device__ (gpu_size_t z, gpu_size_t y, gpu_size_t x, gpu_size_t addr, float *output, float* zl, gpu_signed_size_t sz, float *yl, gpu_signed_size_t sy, float *xl, gpu_signed_size_t sx)
     {
-        output[addr] = (0.01f*zl[0]+0.02f*xl[sx]+0.03f*xl[-sx]+0.04f*yl[sy]+0.05f*yl[-sy]+0.06f*zl[sz]+0.07f*zl[-sz]);
+        output[addr] = (0.01f*zl[0]+
+                        0.02f*xl[sx]+0.03f*xl[-sx]+0.04f*yl[sy]+0.05f*yl[-sy]+0.06f*zl[sz]+0.07f*zl[-sz]+
+                        0.02f*xl[2*sx]+0.03f*xl[-2*sx]+0.04f*yl[2*sy]+0.05f*yl[-2*sy]+0.06f*zl[2*sz]+0.07f*zl[-2*sz]+
+                        0.02f*xl[3*sx]+0.03f*xl[-3*sx]+0.04f*yl[3*sy]+0.05f*yl[-3*sy]+0.06f*zl[3*sz]+0.07f*zl[-3*sz]);
     };
     stencil.barrier();
     start = std::chrono::system_clock::now();

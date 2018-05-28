@@ -101,10 +101,11 @@ __global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_s
     if(ig >= _nx+PADDINGL-M || jg >= _ny-M)return;
     if(ig < M+PADDINGL || jg < M)return;
 
-    gpu_size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
-    gpu_size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
+    gpu_size_t _n1 = _nx+PADDINGL+PADDINGR;
+    gpu_size_t _n12 = _n1*_ny;
+    gpu_size_t addr = ig+_n1*jg+offaddr;
     gpu_signed_size_t addr_fwd = addr-M*_n12-_n12;
-    DataType p1z[2*M+1];
+    DataType p1z[2*M+1], p1y[2*M+1];
 
     #pragma unroll 
     for(gpu_size_t t=1;t<=2*M;t++) p1z[t] = p1[addr_fwd+=_n12];
@@ -113,10 +114,12 @@ __global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_s
     for(gpu_size_t yl=0; yl<_nz; yl++)
     {
         #pragma unroll 
+        for(gpu_size_t t=0,s=addr-M*_n1;t<=2*M;t++,s+=_n1) p1y[t] = p1[s];
+        #pragma unroll 
         for(gpu_size_t t=0;t<2*M;t++) p1z[t] = p1z[t+1];
         p1z[2*M] = p1[addr_fwd+=_n12];
 
-        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, &p1z[M], 1, &p1[addr], _nx+PADDINGL+PADDINGR, &p1[addr], 1, args...);
+        kernel(yl+offz, jg, ig-PADDINGL, addr, p0, &p1z[M], 1, &p1y[M], 1, &p1[addr], 1, args...);
         addr+=_n12;
     }
 }
