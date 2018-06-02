@@ -126,6 +126,52 @@ __global__ static void prop_center_nosm_kernel(DataType *p0, DataType *p1, gpu_s
 
 template <typename DataType, typename gpu_size_t, typename gpu_signed_size_t, gpu_size_t M, gpu_size_t blocks, gpu_size_t PADDINGL, gpu_size_t PADDINGR, gpu_size_t BLOCK_SIZE, typename Function, typename... Arguments>
 __launch_bounds__(1024, blocks)
+__global__ static void prop_inner_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
+{
+    __shared__ DataType p1s[8][128+1];
+
+    gpu_size_t ig = (blockIdx.x * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
+    gpu_size_t jg = (blockIdx.y * (blockDim.y-2*M) + threadIdx.y);
+    if(ig >= _nx+PADDINGL || jg >= _ny)return;
+
+    bool flag = (threadIdx.x>=M && threadIdx.x<blockDim.x-M && threadIdx.y>=M && threadIdx.y<blockDim.y-M 
+        && ig>=M+PADDINGL && ig<_nx-M+PADDINGL && jg>=M && jg<_ny-M);
+
+    gpu_size_t il = threadIdx.x;
+    gpu_size_t jl = threadIdx.y; 
+
+    DataType p1z[2*M+1];
+    gpu_size_t _n12 = (_nx+PADDINGL+PADDINGR)*_ny;
+    gpu_size_t addr = ig+(_nx+PADDINGL+PADDINGR)*jg+offaddr;
+    gpu_signed_size_t addr_fwd = addr-M*_n12-_n12;
+
+    #pragma unroll 
+    for(gpu_size_t t=1;t<M;t++) p1z[t] = p1[addr_fwd+=_n12];
+    p1z[M] = p1s[jl][il] = p1[addr_fwd+=_n12];
+    #pragma unroll 
+    for(gpu_size_t t=M+1;t<=2*M;t++) p1z[t]=p1[addr_fwd+=_n12];
+
+//    #pragma unroll 9
+    for(gpu_size_t yl=0; yl<_nz; yl++)
+    {
+        #pragma unroll 
+        for(gpu_size_t t=0;t<M-1;t++) p1z[t] = p1z[t+1];
+        p1z[M-1] = p1s[jl][il];
+        p1z[M] = p1s[jl][il] = p1z[M+1];
+        #pragma unroll 
+        for(gpu_size_t t=M+1;t<2*M;t++) p1z[t] = p1z[t+1];
+        p1z[2*M] = p1[addr_fwd+=_n12];
+
+        __syncthreads();
+        if(flag)
+            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], 128+1, &p1s[jl][il], 1, args...);
+        __syncthreads();
+        addr+=_n12;
+    }
+}
+
+template <typename DataType, typename gpu_size_t, typename gpu_signed_size_t, gpu_size_t M, gpu_size_t blocks, gpu_size_t PADDINGL, gpu_size_t PADDINGR, gpu_size_t BLOCK_SIZE, typename Function, typename... Arguments>
+__launch_bounds__(1024, blocks)
 __global__ static void prop_center_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
 {
     __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
@@ -198,7 +244,7 @@ template <typename DataType, typename gpu_size_t, typename gpu_signed_size_t, gp
 __launch_bounds__(1024, blocks)
 __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, gpu_size_t _nx, gpu_size_t _ny, gpu_size_t _nz, gpu_size_t nx2, gpu_size_t ny2, gpu_size_t offx, gpu_size_t offy, gpu_size_t offz, gpu_size_t offaddr, Function kernel, Arguments... args)
 {
-    __shared__ DataType p1s[BLOCK_SIZE+2*M][BLOCK_SIZE+2*M+1];
+    __shared__ DataType p1s[BLOCK_SIZE][BLOCK_SIZE+1];
 
     gpu_size_t ig = ((blockIdx.x+offx) * (blockDim.x-2*M) + threadIdx.x + PADDINGL);
     gpu_size_t jg = ((blockIdx.y+offy) * (blockDim.y-2*M) + threadIdx.y);
@@ -236,7 +282,7 @@ __global__ static void prop_halo_kernel(DataType *p0, DataType *p1, gpu_size_t _
 
         __syncthreads();
         if(flag)
-            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], BLOCK_SIZE+2*M+1, &p1s[jl][il], 1, args...);
+            kernel(yl+offz, jg, ig-PADDINGL, addr, p0, p1z+M, 1, &p1s[jl][il], BLOCK_SIZE+1, &p1s[jl][il], 1, args...);
         __syncthreads();
         addr+=_n12;
     }
@@ -651,14 +697,25 @@ public:
 
         if(M == 1)
         {
-            dim3 block(64, 8);
-            dim3 grid(_nx/64+1, _ny/8+1);
+            dim3 block(128, 8);
+            dim3 grid(_nx/(128-2*M)+1, _ny/(8-2*M)+1);
             if(spill)
-                prop_center_nosm_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2048/512, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                prop_inner_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             else
-                prop_center_nosm_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                prop_inner_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             return ;
         }
+
+//        if(M == 1)
+//        {
+//            dim3 block(64, 8);
+//            dim3 grid(_nx/64+1, _ny/8+1);
+//            if(spill)
+//                prop_center_nosm_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2048/512, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+//            else
+//                prop_center_nosm_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+//            return ;
+//        }
 
         dim3 block(BLOCK_SIZE, BLOCK_SIZE);
         if(_nx < 2*BLOCK_SIZE || _ny < 2*BLOCK_SIZE)
