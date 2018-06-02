@@ -365,6 +365,7 @@ private:
     size_t nprocs, rank, size2, off2, off, size, PXSize;
     std::vector<size_t> mpiSize, mpiOff;
     MPI::Datatype mpi_datatype;
+    cudaStream_t streams[3];
 
     size_t GET(size_t z, size_t y, size_t x, size_t nz, size_t ny, size_t nx)
     {
@@ -389,6 +390,10 @@ public:
         nprocs = MPI::COMM_WORLD.Get_size();
         rank = MPI::COMM_WORLD.Get_rank();
         mpi_datatype = MPI::Datatype::Match_size(MPI_TYPECLASS_REAL, sizeof(DataType));
+
+        cudaStreamCreate(&streams[0]);
+        cudaStreamCreate(&streams[1]);
+        cudaStreamCreate(&streams[2]);
 
         mpiSize.resize(nprocs);
         mpiOff.resize(nprocs+1);
@@ -732,13 +737,6 @@ public:
             size_t ny2 = (_ny - 2*M) / BLOCK_SIZE * BLOCK_SIZE + 2*M;
             dim3 block(BLOCK_SIZE, BLOCK_SIZE);
             {
-                dim3 grid((nx2-2*M)/BLOCK_SIZE, (ny2-2*M)/BLOCK_SIZE);
-                if(spill)
-                    prop_center_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
-                else
-                    prop_center_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
-            }
-            {
                 size_t xs = ((nx2-2*M))/(BLOCK_SIZE-2*M);
                 size_t ys = ((ny2-2*M))/(BLOCK_SIZE-2*M);
                 size_t xt = ((_nx-2*M)+(BLOCK_SIZE-2*M)-1)/(BLOCK_SIZE-2*M);
@@ -746,17 +744,24 @@ public:
                 {
                     dim3 grid(xt-xs, yt);
                     if(spill)
-                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[1]>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                     else
-                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[1]>>>(p0, p1,  _nx, _ny, nz, nx2-2*M, ny2-2*M, xs, 0,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 }
                 {
                     dim3 grid(xs, yt-ys);
                     if(spill)
-                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[2]>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                     else
-                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                        prop_halo_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[2]>>>(p0, p1, _nx, _ny, nz, nx2-2*M, ny2-2*M, 0, ys,  size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
                 }
+            }
+            {
+                dim3 grid((nx2-2*M)/BLOCK_SIZE, (ny2-2*M)/BLOCK_SIZE);
+                if(spill)
+                    prop_center_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 2, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[0]>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
+                else
+                    prop_center_kernel<DataType, gpu_size_t, gpu_signed_size_t, M, 1, PADDINGL, PADDINGR, BLOCK_SIZE, Function, Arguments...><<<grid, block, 0, streams[0]>>>(p0, p1, _nx, _ny, nz, size_t(mpiOff[rank]-((rank == 0)?0:M))+M, M*_ny*(_nx+PADDINGL+PADDINGR), kernel, args...);
             }
         }
 //        CUDA_ASSERT(cudaDeviceSynchronize());
