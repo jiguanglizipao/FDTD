@@ -73,16 +73,13 @@ int main(const int argc, const char* argv[])
     for(size_t t=0;t<1000;t++)
     {
         stencil.backupCubeHaloBackup(s0);
-        stencil.backupCubeHaloBackup(s1);
         stencil.propagateHaloTopBackup(s0, s1, true, prop_kernel);
         stencil.propagateHaloButtomBackup(s0, s1, true, prop_kernel);
         stencil.sync();
         stencil.propagate(s0, s1, true, prop_kernel);
         stencil.commCubeHaloBackup(s0);
-        stencil.commCubeHaloBackup(s1);
         stencil.sync();
         stencil.restoreCubeHaloBackup(s0);
-        stencil.restoreCubeHaloBackup(s1);
         stencil.sync();
         std::swap(s0, s1);
     }
