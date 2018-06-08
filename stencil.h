@@ -354,7 +354,7 @@ template <typename gpu_size_t, typename gpu_signed_size_t, typename Function, ty
     kernel(zbase+z, y, x, addr, args...);
 }
 
-template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, bool FDTD=true, typename gpu_size_t=uint32_t, typename gpu_signed_size_t=int32_t, size_t BLOCK_SIZE=32, size_t THREADS=256, size_t PADDINGL=(M==1||!FDTD)?0:M, size_t PADDINGR=(M==1||!FDTD)?(BLOCK_SIZE-XSize%BLOCK_SIZE):((XSize%BLOCK_SIZE>(BLOCK_SIZE-M))?(2*BLOCK_SIZE-M-XSize%BLOCK_SIZE):(BLOCK_SIZE-M-XSize%BLOCK_SIZE))>
+template <typename DataType, size_t ZSize, size_t YSize, size_t XSize, size_t M, bool FDTD=true, typename gpu_size_t=uint32_t, typename gpu_signed_size_t=int32_t, size_t BLOCK_SIZE=32, size_t THREADS=256, size_t PADDINGL=(M<=2||!FDTD)?0:M, size_t PADDINGR=(M<=2||!FDTD)?(BLOCK_SIZE-XSize%BLOCK_SIZE):((XSize%BLOCK_SIZE>(BLOCK_SIZE-M))?(2*BLOCK_SIZE-M-XSize%BLOCK_SIZE):(BLOCK_SIZE-M-XSize%BLOCK_SIZE))>
 class Stencil
 {
 private:
@@ -700,7 +700,7 @@ public:
             return ;
         }
 
-        if(M == 1)
+        if(M <= 2)
         {
             dim3 block(128, 8);
             dim3 grid(_nx/(128-2*M)+1, _ny/(8-2*M)+1);
